@@ -1,0 +1,20 @@
+name = "character-lister-3"
+main = "character-lister-3.js"
+compatibility_date = "2025-02-04"
+workers_dev = true
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[placement]
+mode = "smart"
+
+[vars]
+GITHUB_OWNER = "neon-play"
+GITHUB_REPO = "anime-characters-neonanimecdn"
+GITHUB_TOKEN = "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"
+
+[[kv_namespaces]]
+binding = "PROGRESS_KV"
+id = "55ab63cbe9fb4c1aaef2c4413b4a70e8"
