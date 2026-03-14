@@ -356,8 +356,9 @@ if (!existingRows) {
       INDEX_CACHE[indexPath] = existingRows;
     }
     const newContentStr = existingRows.map(r => JSON.stringify(r)).join("\n") + "\n";
-    GIT_FILES.push({ path: indexPath, content: newContentStr });
-    BUFFER_COUNT++;
+INDEX_CACHE[indexPath] = existingRows;
+GIT_FILES.push({ path: indexPath, content: newContentStr });
+BUFFER_COUNT++;
     await env.PROGRESS_KV.put(KV_BUFFER_KEY, JSON.stringify(GIT_FILES));
     await env.PROGRESS_KV.put(KV_COUNT_KEY, String(BUFFER_COUNT));
   } catch (e) {
@@ -368,7 +369,6 @@ if (!existingRows) {
     await env.PROGRESS_KV.put(KV_BUFFER_KEY, JSON.stringify(GIT_FILES));
     await env.PROGRESS_KV.put(KV_COUNT_KEY, String(BUFFER_COUNT));
   }
-
   if (BUFFER_COUNT >= COMMIT_LIMIT) {
     try {
       await commitGitFiles(env);
