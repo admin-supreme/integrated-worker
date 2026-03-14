@@ -29,8 +29,12 @@ async function countedFetch(url, options) {
   guardSub();
   try {
     console.log(`[countedFetch] #${subrequestCounter} ->`, url);
-  } catch (e) 
-  return fetch(url, options);
+    const response = await fetch(url, options);
+    return response;
+  } catch (e) {
+    console.error('[countedFetch] error:', e);
+    throw e;
+  }
 }
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 export default {
@@ -43,6 +47,23 @@ export default {
       authToken: env.LIBSQL_DB_AUTH_TOKEN
     });
     ctx.waitUntil(runScheduled(env, db));
+  },
+  async fetch(request, env, ctx) {
+    try {
+      const url = new URL(request.url);
+      if (request.method === "POST" && url.pathname === "/run") {
+        const db = createClient({
+          url: env.LIBSQL_DB_URL,
+          authToken: env.LIBSQL_DB_AUTH_TOKEN
+        });
+        ctx.waitUntil(runScheduled(env, db));
+        return new Response("Run queued", { status: 202 });
+      }
+      return new Response("OK", { status: 200 });
+    } catch (err) {
+      console.error("fetch handler error:", err);
+      return new Response("Internal error", { status: 500 });
+    }
   }
 };
 /* ---------- Worker1 logic (scheduled DB scan) ---------- */
@@ -296,7 +317,6 @@ function parseAbout(text){
 /* ---------- Worker3 logic (buffer + commit) ---------- */
 async function processSingleCharacterPayload(body, env) {
   guard();
-  // Ensure buffer is loaded from KV on first use
   if (GIT_FILES.length === 0) {
     const saved = await env.PROGRESS_KV.get(KV_BUFFER_KEY);
     const savedCount = await env.PROGRESS_KV.get(KV_COUNT_KEY);
@@ -395,9 +415,11 @@ function getIndexLetter(title) {
 }
 async function ensureGithubOk(res, step) {
   if (!res.ok) {
-    const txt = await res.text();
+    const txt = await res.text().catch(() => "<no-body>");
+    console.error(`GitHub ${step} failed: status=${res.status} body=${txt.substring(0,2000)}`);
     throw new Error(`GitHub ${step} failed: ${res.status} ${txt}`);
   }
+}
 }
 async function commitGitFiles(env) {
   if (!GIT_FILES || GIT_FILES.length === 0) {
@@ -408,44 +430,56 @@ async function commitGitFiles(env) {
     await env.PROGRESS_KV.delete(KV_COUNT_KEY);
     return;
   }
+  if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) {
+    throw new Error("Missing GITHUB_TOKEN, GITHUB_OWNER or GITHUB_REPO in environment");
+  }
   const repoUrl = `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}`;
-  const branchRes = await countedFetch(`${repoUrl}/branches/main`, {
-  headers: {
-  Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-  "Content-Type": "application/json",
-  "User-Agent": "cf-worker"
-}
-});
+  const repoRes = await countedFetch(repoUrl, {
+    headers: {
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      "User-Agent": "cf-worker"
+    }
+  });
+  await ensureGithubOk(repoRes, "get repo");
+  const repoData = await repoRes.json();
+  const branchName = repoData.default_branch || "main";
+  const branchRes = await countedFetch(`${repoUrl}/branches/${branchName}`, {
+    headers: {
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      "Content-Type": "application/json",
+      "User-Agent": "cf-worker"
+    }
+  });
   await ensureGithubOk(branchRes, "get branch");
   const branchData = await branchRes.json();
   const baseSha = branchData.commit.sha;
   const commitRes = await countedFetch(`${repoUrl}/git/commits/${baseSha}`, {
-  headers: {
-Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-    "User-Agent": "cf-worker"
-  }
-});
+    headers: {
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      "User-Agent": "cf-worker"
+    }
+  });
   await ensureGithubOk(commitRes, "get commit");
   const commitData = await commitRes.json();
-for (const indexPath in INDEX_CACHE) {
-  const rows = INDEX_CACHE[indexPath];
-  const content = rows.map(r => JSON.stringify(r)).join("\n") + "\n";
-  GIT_FILES.push({
-    path: indexPath,
-    content
-  });
-}
-  console.log(`[commitGitFiles] creating tree with ${GIT_FILES.length} files, BUFFER_COUNT=${BUFFER_COUNT}`);
+  const filesMap = new Map();
+  for (const f of GIT_FILES) filesMap.set(f.path, f.content);
+  for (const idxPath in INDEX_CACHE) {
+    const rows = INDEX_CACHE[idxPath];
+    const content = rows.map(r => JSON.stringify(r)).join("\n") + "\n";
+    filesMap.set(idxPath, content);
+  }
+  const finalFiles = Array.from(filesMap.entries()).map(([path, content]) => ({ path, content }));
+  console.log(`[commitGitFiles] creating tree with ${finalFiles.length} files, BUFFER_COUNT=${BUFFER_COUNT}`);
   const treeRes = await countedFetch(`${repoUrl}/git/trees`, {
     method: "POST",
     headers: {
-  Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-  "Content-Type": "application/json",
-  "User-Agent": "cf-worker"
-},
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      "Content-Type": "application/json",
+      "User-Agent": "cf-worker"
+    },
     body: JSON.stringify({
       base_tree: commitData.tree.sha,
-      tree: GIT_FILES.map(f => ({
+      tree: finalFiles.map(f => ({
         path: f.path,
         mode: "100644",
         type: "blob",
@@ -458,30 +492,30 @@ for (const indexPath in INDEX_CACHE) {
   const newCommitRes = await countedFetch(`${repoUrl}/git/commits`, {
     method: "POST",
     headers: {
-  Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-  "Content-Type": "application/json",
-  "User-Agent": "cf-worker"
-},
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      "Content-Type": "application/json",
+      "User-Agent": "cf-worker"
+    },
     body: JSON.stringify({
-      message: `Upload ${GIT_FILES.length} files`,
+      message: `Upload ${finalFiles.length} files`,
       tree: treeData.sha,
       parents: [baseSha]
     })
   });
   await ensureGithubOk(newCommitRes, "create commit");
   const newCommitData = await newCommitRes.json();
-  const refRes = await countedFetch(`${repoUrl}/git/refs/heads/main`, {
+  const refRes = await countedFetch(`${repoUrl}/git/refs/heads/${branchName}`, {
     method: "PATCH",
     headers: {
-  Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-  "Content-Type": "application/json",
-  "User-Agent": "cf-worker"
-},
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      "Content-Type": "application/json",
+      "User-Agent": "cf-worker"
+    },
     body: JSON.stringify({ sha: newCommitData.sha })
   });
   await ensureGithubOk(refRes, "update ref");
-  console.log("Committed", GIT_FILES.length, "files to repo.");
-GIT_FILES = [];
-BUFFER_COUNT = 0;
-for (const k in INDEX_CACHE) delete INDEX_CACHE[k];
-}
+  console.log("Committed", finalFiles.length, "files to repo.");
+  GIT_FILES = [];
+  BUFFER_COUNT = 0;
+  for (const k in INDEX_CACHE) delete INDEX_CACHE[k];
+          }
