@@ -1,0 +1,14 @@
+{
+  "name": "character-lister",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "character-lister.js",
+  "dependencies": {
+    "@libsql/client": "^0.17.0"
+  },
+  "scripts": {
+    "deploy": "wrangler publish",
+    "dev": "wrangler dev",
+    "publish": "wrangler deploy --minify"
+  }
+}
