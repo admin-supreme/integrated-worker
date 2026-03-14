@@ -420,7 +420,6 @@ async function ensureGithubOk(res, step) {
     throw new Error(`GitHub ${step} failed: ${res.status} ${txt}`);
   }
 }
-}
 async function commitGitFiles(env) {
   if (!GIT_FILES || GIT_FILES.length === 0) {
     console.log("No files to commit");
