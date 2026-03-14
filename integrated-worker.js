@@ -1,18 +1,16 @@
 import { createClient } from "@libsql/client/web";
 /* ---------- Config & globals ---------- */
 const CHARACTER_FETCH_LIMIT = 30;
-const MAX_REQUESTS = 49;
+const MAX_REQUESTS = 49;   
 const SUBREQUEST_LIMIT = 60;
 let requestCounter = 0;
 let subrequestCounter = 0;
-
 let GIT_FILES = [];
 let BUFFER_COUNT = 0;
 const INDEX_CACHE = {};
 const COMMIT_LIMIT = 150;
 const KV_BUFFER_KEY = "git_buffer_files";
 const KV_COUNT_KEY = "git_buffer_count";
-
 function guard() {
   requestCounter++;
   if (requestCounter >= MAX_REQUESTS) {
@@ -67,7 +65,6 @@ async function saveProgress(env, animeId, idx) {
 async function runScheduled(env, db) {
   let lastId = await getAnimeProgress(env) || 0;
   let skipCount = 0, MAX_SKIP = 12;
-
   for (let iteration = 0; iteration < 3; iteration++) {
     guard();
     const res = await db.execute({
@@ -81,7 +78,6 @@ async function runScheduled(env, db) {
     const anime = res.rows[0];
     lastId = anime.id;
     console.log("Processing anime:", anime.id, anime.title, anime.mal_id);
-
     if (!anime.mal_id || isNaN(Number(anime.mal_id))) {
       console.log("Invalid MAL id, skipping:", anime.mal_id);
       await saveAnimeProgress(env, anime.id);
@@ -89,7 +85,6 @@ async function runScheduled(env, db) {
       if (skipCount >= MAX_SKIP) { console.log("Skip limit reached"); break; }
       continue;
     }
-
     try {
       const url = `https://api.jikan.moe/v4/anime/${anime.mal_id}/characters`;
       const charRes = await countedFetch(url);
@@ -117,7 +112,6 @@ async function runScheduled(env, db) {
         if (skipCount >= MAX_SKIP) break;
         continue;
       }
-
       skipCount = 0;
       const startIndex = await getProgress(env, anime.id) || 0;
       const endIndex = Math.min(startIndex + CHARACTER_FETCH_LIMIT, charData.data.length);
@@ -329,9 +323,10 @@ async function processSingleCharacterPayload(body, env) {
 if (!existingRows) {
   const existing = await countedFetch(url, {
     headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      "User-Agent": "merged-worker"
-    }
+  Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+  "Content-Type": "application/json",
+  "User-Agent": "cf-worker"
+}
   });
   let existingContent = "";
   if (existing.status === 200) {
@@ -354,10 +349,7 @@ if (!existingRows) {
       existingRows.push({ ai: animeId, cf: [character.mal_character_id] });
       INDEX_CACHE[indexPath] = existingRows;
     }
-    const newContentStr = existingRows.map(r => JSON.stringify(r)).join("\n") + "\n";
-INDEX_CACHE[indexPath] = existingRows;
-GIT_FILES.push({ path: indexPath, content: newContentStr });
-BUFFER_COUNT++;
+    INDEX_CACHE[indexPath] = existingRows;
     await env.PROGRESS_KV.put(KV_BUFFER_KEY, JSON.stringify(GIT_FILES));
     await env.PROGRESS_KV.put(KV_COUNT_KEY, String(BUFFER_COUNT));
   } catch (e) {
@@ -371,12 +363,6 @@ BUFFER_COUNT++;
 
   if (BUFFER_COUNT >= COMMIT_LIMIT) {
     try {
-      async function ensureGithubOk(res, step) {
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`GitHub ${step} failed: ${res.status} ${txt}`);
-  }
-}
       await commitGitFiles(env);
       GIT_FILES = [];
       BUFFER_COUNT = 0;
@@ -421,22 +407,38 @@ async function commitGitFiles(env) {
   }
   const repoUrl = `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}`;
   const branchRes = await countedFetch(`${repoUrl}/branches/main`, {
-    headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` }
-  });
+  headers: {
+  Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+  "Content-Type": "application/json",
+  "User-Agent": "cf-worker"
+}
+});
   await ensureGithubOk(branchRes, "get branch");
   const branchData = await branchRes.json();
   const baseSha = branchData.commit.sha;
   const commitRes = await countedFetch(`${repoUrl}/git/commits/${baseSha}`, {
-    headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` }
-  });
+  headers: {
+    Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+    "User-Agent": "cf-worker"
+  }
+});
   await ensureGithubOk(commitRes, "get commit");
   const commitData = await commitRes.json();
+for (const indexPath in INDEX_CACHE) {
+  const rows = INDEX_CACHE[indexPath];
+  const content = rows.map(r => JSON.stringify(r)).join("\n") + "\n";
+  GIT_FILES.push({
+    path: indexPath,
+    content
+  });
+}
   const treeRes = await countedFetch(`${repoUrl}/git/trees`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      "Content-Type": "application/json"
-    },
+  Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+  "Content-Type": "application/json",
+  "User-Agent": "cf-worker"
+},
     body: JSON.stringify({
       base_tree: commitData.tree.sha,
       tree: GIT_FILES.map(f => ({
@@ -452,9 +454,10 @@ async function commitGitFiles(env) {
   const newCommitRes = await countedFetch(`${repoUrl}/git/commits`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      "Content-Type": "application/json"
-    },
+  Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+  "Content-Type": "application/json",
+  "User-Agent": "cf-worker"
+},
     body: JSON.stringify({
       message: `Upload ${GIT_FILES.length} files`,
       tree: treeData.sha,
@@ -466,14 +469,18 @@ async function commitGitFiles(env) {
   const refRes = await countedFetch(`${repoUrl}/git/refs/heads/main`, {
     method: "PATCH",
     headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      "Content-Type": "application/json"
-    },
+  Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+  "Content-Type": "application/json",
+  "User-Agent": "cf-worker"
+},
     body: JSON.stringify({ sha: newCommitData.sha })
   });
   await ensureGithubOk(refRes, "update ref");
   const verifyRes = await countedFetch(`${repoUrl}/branches/main`, {
-    headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` }
+    headers: {
+  Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+  "User-Agent": "cf-worker"
+}
   });
   await ensureGithubOk(verifyRes, "verify branch");
   const verifyData = await verifyRes.json();
@@ -481,6 +488,7 @@ async function commitGitFiles(env) {
     throw new Error("GitHub commit verification failed");
   }
   console.log("Committed", GIT_FILES.length, "files to repo.");
-  GIT_FILES = [];
-  BUFFER_COUNT = 0;
-       }
+GIT_FILES = [];
+BUFFER_COUNT = 0;
+for (const k in INDEX_CACHE) delete INDEX_CACHE[k];
+}
