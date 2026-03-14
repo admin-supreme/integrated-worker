@@ -8,7 +8,6 @@ LIBSQL_DB_URL = "https://neon-anime-db-lupinarashi.turso.io"
 LIBSQL_DB_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicm8iLCJpYXQiOjE3NzMyMjYxNTcsImlkIjoiZGY1MzQ0OWEtZmNlNi00YzIwLTlhNWMtODdlY2JkZjZkNjA0IiwicmlkIjoiODcwYzBmZDUtNWM4Ny00MGYwLWFhZTYtYTE0YTUyZmEwZDk1In0.TPcfWulv1dbwTcXnwNpkFJN1DqiE0YafHf3yeflW6Q9bkfmWlfR56ldtge_8A63YIRVTIujAy0A3sbGlqhhMBw"
 GITHUB_OWNER = "neon-play"
 GITHUB_REPO = "anime-characters-neonanimecdn"
-GITHUB_TOKEN = "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"
 
 [[kv_namespaces]]
 binding = "PROGRESS_KV"
