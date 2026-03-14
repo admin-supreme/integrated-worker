@@ -17,8 +17,5 @@ id = "55ab63cbe9fb4c1aaef2c4413b4a70e8"
 [triggers]
 crons = ["*/5 * * * *"]
 
-[limits]
-cpu_ms = 50000
-
 [observability]
 enabled = true
