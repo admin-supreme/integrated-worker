@@ -1,8 +1,8 @@
 import { createClient } from "@libsql/client/web";
 /* ---------- Config & globals ---------- */
 const CHARACTER_FETCH_LIMIT = 30;
-const MAX_REQUESTS = 40; 
-const SUBREQUEST_LIMIT = 80;
+const MAX_REQUESTS = 49;
+const SUBREQUEST_LIMIT = 60;
 let requestCounter = 0;
 let subrequestCounter = 0;
 
@@ -12,6 +12,7 @@ const INDEX_CACHE = {};
 const COMMIT_LIMIT = 150;
 const KV_BUFFER_KEY = "git_buffer_files";
 const KV_COUNT_KEY = "git_buffer_count";
+
 function guard() {
   requestCounter++;
   if (requestCounter >= MAX_REQUESTS) {
@@ -403,7 +404,12 @@ function getIndexLetter(title) {
   if (/[a-z]/.test(first)) return first;
   return "#";
 }
-
+async function ensureGithubOk(res, step) {
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`GitHub ${step} failed: ${res.status} ${txt}`);
+  }
+}
 async function commitGitFiles(env) {
   if (!GIT_FILES || GIT_FILES.length === 0) {
     console.log("No files to commit");
@@ -415,18 +421,17 @@ async function commitGitFiles(env) {
   }
   const repoUrl = `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}`;
   const branchRes = await countedFetch(`${repoUrl}/branches/main`, {
-  headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` }
-});
-await ensureGithubOk(branchRes, "get branch");
-const branchData = await branchRes.json();
+    headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` }
+  });
+  await ensureGithubOk(branchRes, "get branch");
+  const branchData = await branchRes.json();
   const baseSha = branchData.commit.sha;
   const commitRes = await countedFetch(`${repoUrl}/git/commits/${baseSha}`, {
-  headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` }
-});
-await ensureGithubOk(commitRes, "get commit");
-const commitData = await commitRes.json();
+    headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` }
+  });
+  await ensureGithubOk(commitRes, "get commit");
+  const commitData = await commitRes.json();
   const treeRes = await countedFetch(`${repoUrl}/git/trees`, {
-    await ensureGithubOk(treeRes, "create tree");
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.GITHUB_TOKEN}`,
@@ -442,9 +447,9 @@ const commitData = await commitRes.json();
       }))
     })
   });
+  await ensureGithubOk(treeRes, "create tree");
   const treeData = await treeRes.json();
   const newCommitRes = await countedFetch(`${repoUrl}/git/commits`, {
-    await ensureGithubOk(newCommitRes, "create commit");
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.GITHUB_TOKEN}`,
@@ -456,9 +461,9 @@ const commitData = await commitRes.json();
       parents: [baseSha]
     })
   });
+  await ensureGithubOk(newCommitRes, "create commit");
   const newCommitData = await newCommitRes.json();
   const refRes = await countedFetch(`${repoUrl}/git/refs/heads/main`, {
-    await ensureGithubOk(refRes, "update ref");
     method: "PATCH",
     headers: {
       Authorization: `Bearer ${env.GITHUB_TOKEN}`,
@@ -466,15 +471,16 @@ const commitData = await commitRes.json();
     },
     body: JSON.stringify({ sha: newCommitData.sha })
   });
+  await ensureGithubOk(refRes, "update ref");
   const verifyRes = await countedFetch(`${repoUrl}/branches/main`, {
-  headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` }
-});
-await ensureGithubOk(verifyRes, "verify branch");
-const verifyData = await verifyRes.json();
-if (verifyData.commit.sha !== newCommitData.sha) {
-  throw new Error("GitHub commit verification failed");
-}
+    headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` }
+  });
+  await ensureGithubOk(verifyRes, "verify branch");
+  const verifyData = await verifyRes.json();
+  if (verifyData.commit.sha !== newCommitData.sha) {
+    throw new Error("GitHub commit verification failed");
+  }
   console.log("Committed", GIT_FILES.length, "files to repo.");
   GIT_FILES = [];
   BUFFER_COUNT = 0;
-                                      }
+       }
