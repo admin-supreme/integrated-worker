@@ -419,7 +419,7 @@ const res = await countedFetch(url, {
     "User-Agent": "cf-worker"
   }
 });
-      if (res.status === 200) {
+    if (res.status === 200) {
         const data = await res.json();
         const content = data.content ? atob(data.content.replace(/\s/g, "")) : "";
         existingRows = content
