@@ -15,7 +15,7 @@ binding = "PROGRESS_KV"
 id = "55ab63cbe9fb4c1aaef2c4413b4a70e8"
 
 [triggers]
-crons = ["* * * * *"]
+crons = ["0 */12 * * *"]
 
 [observability]
 enabled = true
