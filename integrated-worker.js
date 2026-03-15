@@ -1,5 +1,4 @@
 import { createClient } from "@libsql/client/web";
-/* ---------- Config & globals ---------- */
 const CHARACTER_FETCH_LIMIT = 30;
 const MAX_REQUESTS = 49;   
 const SUBREQUEST_LIMIT = 200;
@@ -61,7 +60,6 @@ export default {
     }
   }
 };
-/* ---------- Worker1 logic (scheduled DB scan) ---------- */
 async function getAnimeProgress(env) {
   guard();
   const v = await env.PROGRESS_KV.get("anime_progress");
@@ -80,7 +78,6 @@ async function saveProgress(env, animeId, idx) {
   guard();
   await env.PROGRESS_KV.put(`progress:${animeId}`, String(idx));
 }
-
 async function runScheduled(env, db) {
   let lastId = await getAnimeProgress(env) || 0;
   let skipCount = 0, MAX_SKIP = 12;
@@ -146,8 +143,6 @@ async function runScheduled(env, db) {
         }
         continue;
       }
-
-      // Build payload similar to previous worker1 -> worker2 POST
       const payload = {
         animeId: anime.id,
         animeMalId: anime.mal_id,
@@ -183,8 +178,6 @@ async function runScheduled(env, db) {
     }
   }
 }
-
-/* ---------- Worker2 logic (fetchCharacterDetails + batch processing) ---------- */
 async function processCharactersBatch(body, env) {
   guard();
   if (!body) throw new Error("No body");
@@ -197,7 +190,6 @@ async function processCharactersBatch(body, env) {
   if (!animeId || charIds.length === 0) {
     throw new Error("No characters to process");
   }
-
   for (const characterId of charIds) {
     try {
       const full = await fetchCharacterDetails(characterId);
@@ -213,14 +205,11 @@ async function processCharactersBatch(body, env) {
         },
         last: body.last === true
       };
-
-      // Instead of posting to Worker3, call its processor directly
       try {
         await processSingleCharacterPayload(payload, env);
       } catch (e) {
         console.error("Error processing single character payload:", e);
       }
-
       await sleep(400);
     } catch (e) {
       if (e.message === "SAFE_STOP") {
@@ -231,7 +220,6 @@ async function processCharactersBatch(body, env) {
     }
   }
 }
-
 async function fetchCharacterDetails(characterId) {
   try {
     let res = await countedFetch(`https://api.jikan.moe/v4/characters/${characterId}/full`);
@@ -272,7 +260,6 @@ async function fetchCharacterDetails(characterId) {
     return {};
   }
 }
-
 function parseAbout(text){
   const result = { height_cm: null, weight_kg: null };
   const attributes = {};
@@ -309,63 +296,91 @@ function parseAbout(text){
   }
   return { ...attributes, ...result, cleaned_about: String(text || "").trim() };
 }
-async function commitFilesImmediate(env, files) {
-  guard(); // count a main request
-  if (!files || files.length === 0) return;
-  if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) {
-    throw new Error("Missing GITHUB_TOKEN, GITHUB_OWNER or GITHUB_REPO in environment");
-  }
-  const repo = `${env.GITHUB_OWNER}/${env.GITHUB_REPO}`;
-  const repoUrl = `https://api.github.com/repos/${repo}`;
+async function commitExport(env) {
+  await new Promise(r => setTimeout(r, 100));
+  const files = env.__exportFiles || [];
+  if (files.length === 0) return;
   const headers = {
-    Authorization: `token ${env.GITHUB_TOKEN}`,
+    Authorization: `Bearer ${env.GITHUB_TOKEN}`,
     Accept: "application/vnd.github+json",
     "Content-Type": "application/json",
-    "User-Agent": "cf-worker"
+    "User-Agent": "Supreme-Admin-Worker"
   };
-  const repoRes = await countedFetch(repoUrl, { headers });
-  await ensureGithubOk(repoRes, "get repo");
-  const repoData = await repoRes.json();
-  const branchName = repoData.default_branch || "main";
-  const refRes = await countedFetch(`${repoUrl}/git/ref/heads/${branchName}`, { headers });
-  await ensureGithubOk(refRes, "get ref");
+  const repo = env.GITHUB_REPO;
+  const refRes = await countedFetch(
+    `https://api.github.com/repos/${repo}/git/ref/heads/main`,
+    { headers }
+  );
+  if (!refRes.ok) {
+    const text = await refRes.text();
+    throw new Error("GitHub ref fetch failed: " + text);
+  }
   const refData = await refRes.json();
   const latestCommitSha = refData.object.sha;
-  const commitRes = await countedFetch(`${repoUrl}/git/commits/${latestCommitSha}`, { headers });
-  await ensureGithubOk(commitRes, "get commit");
+  const commitRes = await fetch(
+    `https://api.github.com/repos/${repo}/git/commits/${latestCommitSha}`,
+    { headers }
+  );
+  if (!commitRes.ok) {
+    const text = await commitRes.text();
+    throw new Error("GitHub commit fetch failed: " + text);
+  }
   const commitData = await commitRes.json();
   const baseTree = commitData.tree.sha;
-  const tree = files.map(file => ({
+  const treeItems = files.map(file => ({
     path: file.path,
     mode: "100644",
     type: "blob",
-    content: String(file.content)
+    content: new TextDecoder().decode(
+      Uint8Array.from(atob(file.content.replace(/\s/g, "")), c => c.charCodeAt(0))
+    )
   }));
-  const treeRes = await countedFetch(`${repoUrl}/git/trees`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ base_tree: baseTree, tree })
-  });
-  await ensureGithubOk(treeRes, "create tree");
+  const treeRes = await fetch(
+    `https://api.github.com/repos/${repo}/git/trees`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        base_tree: baseTree,
+        tree: treeItems
+      })
+    }
+  );
+  if (!treeRes.ok) {
+    const text = await treeRes.text();
+    throw new Error("GitHub tree creation failed: " + text);
+  }
   const treeData = await treeRes.json();
-  const newCommitRes = await countedFetch(`${repoUrl}/git/commits`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      message: `Upload ${files.length} files`,
-      tree: treeData.sha,
-      parents: [latestCommitSha]
-    })
-  });
-  await ensureGithubOk(newCommitRes, "create commit");
-  const newCommitData = await newCommitRes.json();
-  const refUpdate = await countedFetch(`${repoUrl}/git/refs/heads/${branchName}`, {
-    method: "PATCH",
-    headers,
-    body: JSON.stringify({ sha: newCommitData.sha })
-  });
-  await ensureGithubOk(refUpdate, "update ref");
-  console.log("Committed", files.length, "files to repo (immediate).");
+  const newCommitRes = await fetch(
+    `https://api.github.com/repos/${repo}/git/commits`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        message: "Auto export dataset",
+        tree: treeData.sha,
+        parents: [latestCommitSha]
+      })
+    }
+  );
+  if (!newCommitRes.ok) {
+    const text = await newCommitRes.text();
+    throw new Error("GitHub commit creation failed: " + text);
+  }
+  const newCommit = await newCommitRes.json();
+  const refUpdate = await fetch(
+    `https://api.github.com/repos/${repo}/git/refs/heads/main`,
+    {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ sha: newCommit.sha })
+    }
+  );
+  if (!refUpdate.ok) {
+    const text = await refUpdate.text();
+    throw new Error("GitHub ref update failed: " + text);
+  }
+  env.__exportFiles = [];
 }
 async function processSingleCharacterPayload(body, env) {
   guard();
@@ -423,14 +438,20 @@ async function processSingleCharacterPayload(body, env) {
   INDEX_CACHE[indexPath] = existingRows;
   const indexContent = existingRows.map(r => JSON.stringify(r)).join("\n") + "\n";
   try {
-    await commitFilesImmediate(env, [
-      { path: charPath, content: charContent },
-      { path: indexPath, content: indexContent }
-    ]);
-  } catch (err) {
-    if (err && err.message && err.message.includes("SAFE_STOP")) throw err;
-    console.error("Immediate commit failed for files:", err);
-  }
+  if (!env.__exportFiles) env.__exportFiles = [];
+  env.__exportFiles.push({
+    path: charPath,
+    content: toBase64Utf8(charContent) 
+  });
+  env.__exportFiles.push({
+    path: indexPath,
+    content: toBase64Utf8(indexContent)
+  });
+  await commitExport(env);
+} catch (err) {
+  if (err && err.message && err.message.includes("SAFE_STOP")) throw err;
+  console.error("Immediate commit failed for files:", err);
+}
   if (body.last === true) {
     try {
       await env.PROGRESS_KV.delete(`progress:${animeId}`);
@@ -439,6 +460,15 @@ async function processSingleCharacterPayload(body, env) {
       console.error("Failed to update progress KV after last:", e);
     }
   }
+}
+async function uploadChunk(env, index, rows) {
+  const content = JSON.stringify(rows);
+  const base64 = toBase64Utf8(content);
+  if (!env.__exportFiles) env.__exportFiles = [];
+  env.__exportFiles.push({
+    path: `anime/part_${index}.json`,
+    content: base64
+  });
 }
 function removeNulls(obj) {
   const clean = {};
@@ -465,4 +495,4 @@ function toBase64Utf8(str) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
-        }
+  }
