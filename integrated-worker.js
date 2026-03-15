@@ -33,7 +33,7 @@ async function appendToBuffer(env, fileObj) {
   }
   env.__kvBuffer.push(fileObj);
 }
-async function getBufferCount(env) 
+async function getBufferCount(env) {
   try {
     const v = await env.PROGRESS_KV.get(GIT_BUFFER_COUNT_KEY);
     return v ? parseInt(v, 10) : 0;
