@@ -5,12 +5,7 @@ const MAX_REQUESTS = 49;
 const SUBREQUEST_LIMIT = 200;
 let requestCounter = 0;
 let subrequestCounter = 0;
-let GIT_FILES = [];
-let BUFFER_COUNT = 0;
 const INDEX_CACHE = {};
-const COMMIT_LIMIT = 150;
-const KV_BUFFER_KEY = "git_buffer_files";
-const KV_COUNT_KEY = "git_buffer_count";
 function guard() {
   requestCounter++;
   if (requestCounter >= MAX_REQUESTS) {
@@ -314,94 +309,137 @@ function parseAbout(text){
   }
   return { ...attributes, ...result, cleaned_about: String(text || "").trim() };
 }
-/* ---------- Worker3 logic (buffer + commit) ---------- */
+async function commitFilesImmediate(env, files) {
+  guard(); // count a main request
+  if (!files || files.length === 0) return;
+  if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) {
+    throw new Error("Missing GITHUB_TOKEN, GITHUB_OWNER or GITHUB_REPO in environment");
+  }
+  const repo = `${env.GITHUB_OWNER}/${env.GITHUB_REPO}`;
+  const repoUrl = `https://api.github.com/repos/${repo}`;
+  const headers = {
+    Authorization: `token ${env.GITHUB_TOKEN}`,
+    Accept: "application/vnd.github+json",
+    "Content-Type": "application/json",
+    "User-Agent": "cf-worker"
+  };
+  const repoRes = await countedFetch(repoUrl, { headers });
+  await ensureGithubOk(repoRes, "get repo");
+  const repoData = await repoRes.json();
+  const branchName = repoData.default_branch || "main";
+  const refRes = await countedFetch(`${repoUrl}/git/ref/heads/${branchName}`, { headers });
+  await ensureGithubOk(refRes, "get ref");
+  const refData = await refRes.json();
+  const latestCommitSha = refData.object.sha;
+  const commitRes = await countedFetch(`${repoUrl}/git/commits/${latestCommitSha}`, { headers });
+  await ensureGithubOk(commitRes, "get commit");
+  const commitData = await commitRes.json();
+  const baseTree = commitData.tree.sha;
+  const tree = files.map(file => ({
+    path: file.path,
+    mode: "100644",
+    type: "blob",
+    content: String(file.content)
+  }));
+  const treeRes = await countedFetch(`${repoUrl}/git/trees`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ base_tree: baseTree, tree })
+  });
+  await ensureGithubOk(treeRes, "create tree");
+  const treeData = await treeRes.json();
+  const newCommitRes = await countedFetch(`${repoUrl}/git/commits`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      message: `Upload ${files.length} files`,
+      tree: treeData.sha,
+      parents: [latestCommitSha]
+    })
+  });
+  await ensureGithubOk(newCommitRes, "create commit");
+  const newCommitData = await newCommitRes.json();
+  const refUpdate = await countedFetch(`${repoUrl}/git/refs/heads/${branchName}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ sha: newCommitData.sha })
+  });
+  await ensureGithubOk(refUpdate, "update ref");
+  console.log("Committed", files.length, "files to repo (immediate).");
+}
 async function processSingleCharacterPayload(body, env) {
   guard();
-  if (GIT_FILES.length === 0) {
-    const saved = await env.PROGRESS_KV.get(KV_BUFFER_KEY);
-    const savedCount = await env.PROGRESS_KV.get(KV_COUNT_KEY);
-    if (saved) GIT_FILES = JSON.parse(saved);
-    if (savedCount) BUFFER_COUNT = parseInt(savedCount);
-  }
+  if (!body) throw new Error("No body provided to processSingleCharacterPayload");
   const animeId = body.animeId;
   const character = body.character;
   const animeTitle = body.animeTitle || "";
-
   if (!animeId || !character) throw new Error("Bad payload");
-
   const charPath = `characters/${character.mal_character_id}.json`;
   const charContent = JSON.stringify(removeNulls(character), null, 2);
-
-  GIT_FILES.push({ path: charPath, content: charContent });
-  BUFFER_COUNT++;
-  await env.PROGRESS_KV.put(KV_BUFFER_KEY, JSON.stringify(GIT_FILES));
-  await env.PROGRESS_KV.put(KV_COUNT_KEY, String(BUFFER_COUNT));
-
-  // update index ndjson file
   const letter = getIndexLetter(animeTitle || (character.name || ""));
   const indexPath = `index/${letter}.ndjson`;
-  try {
-    const url = `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/contents/${indexPath}`;
-    let existingRows = INDEX_CACHE[indexPath];
-if (!existingRows) {
-  const existing = await countedFetch(url, {
-    headers: {
-  Authorization: `token ${env.GITHUB_TOKEN}`,
-  "Content-Type": "application/json",
-  "User-Agent": "cf-worker"
-}
-  });
-  let existingContent = "";
-  if (existing.status === 200) {
-    const data = await existing.json();
-    if (data.content) existingContent = atob(data.content.replace(/\s/g, ""));
-  }
-  existingRows = existingContent
-    ? existingContent.split("\n").filter(Boolean).map(l => JSON.parse(l))
-    : [];
-  INDEX_CACHE[indexPath] = existingRows;
-}
-    const idx = existingRows.findIndex(r => r.ai === animeId);
-    if (idx >= 0) {
-      const row = existingRows[idx];
-      const cf = Array.isArray(row.cf) ? row.cf : [];
-      if (!cf.includes(character.mal_character_id)) cf.push(character.mal_character_id);
-      existingRows[idx] = { ai: animeId, cf };
-      INDEX_CACHE[indexPath] = existingRows;
-    } else {
-      existingRows.push({ ai: animeId, cf: [character.mal_character_id] });
-      INDEX_CACHE[indexPath] = existingRows;
+  let existingRows = INDEX_CACHE[indexPath];
+  if (!existingRows) {
+    try {
+      const url = `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/contents/${indexPath}`;
+      const res = await countedFetch(url, {
+        headers: {
+          Authorization: `token ${env.GITHUB_TOKEN}`,
+          "Content-Type": "application/json",
+          "User-Agent": "cf-worker"
+        }
+      });
+      if (res.status === 200) {
+        const data = await res.json();
+        const content = data.content ? atob(data.content.replace(/\s/g, "")) : "";
+        existingRows = content
+          ? content.split("\n").filter(Boolean).map(l => {
+              try { return JSON.parse(l); } catch { return null; }
+            }).filter(Boolean)
+          : [];
+      } else if (res.status === 404) {
+        existingRows = [];
+      } else {
+        const txt = await res.text().catch(()=>"<no-body>");
+        console.error(`Index fetch non-200 for ${indexPath}:`, res.status, txt.substring(0,200));
+        existingRows = [];
+      }
+    } catch (e) {
+      if (e && e.message && e.message.includes("SAFE_STOP")) throw e;
+      console.error("Error fetching index file, treating as empty:", e);
+      existingRows = [];
     }
     INDEX_CACHE[indexPath] = existingRows;
-    await env.PROGRESS_KV.put(KV_BUFFER_KEY, JSON.stringify(GIT_FILES));
-    await env.PROGRESS_KV.put(KV_COUNT_KEY, String(BUFFER_COUNT));
-  } catch (e) {
-    if (e && e.message && e.message.includes("SAFE_STOP")) throw e;
-    const newContentStr = JSON.stringify({ ai: animeId, cf: [character.mal_character_id] }) + "\n";
-    GIT_FILES.push({ path: indexPath, content: newContentStr });
-    BUFFER_COUNT++;
-    await env.PROGRESS_KV.put(KV_BUFFER_KEY, JSON.stringify(GIT_FILES));
-    await env.PROGRESS_KV.put(KV_COUNT_KEY, String(BUFFER_COUNT));
   }
-
-  if (BUFFER_COUNT >= COMMIT_LIMIT) {
+  const idx = existingRows.findIndex(r => r.ai === animeId);
+  if (idx >= 0) {
+    const row = existingRows[idx];
+    const cf = Array.isArray(row.cf) ? row.cf : [];
+    if (!cf.includes(character.mal_character_id)) cf.push(character.mal_character_id);
+    existingRows[idx] = { ai: animeId, cf };
+  } else {
+    existingRows.push({ ai: animeId, cf: [character.mal_character_id] });
+  }
+  INDEX_CACHE[indexPath] = existingRows;
+  const indexContent = existingRows.map(r => JSON.stringify(r)).join("\n") + "\n";
+  try {
+    await commitFilesImmediate(env, [
+      { path: charPath, content: charContent },
+      { path: indexPath, content: indexContent }
+    ]);
+  } catch (err) {
+    if (err && err.message && err.message.includes("SAFE_STOP")) throw err;
+    console.error("Immediate commit failed for files:", err);
+  }
+  if (body.last === true) {
     try {
-      await commitGitFiles(env);
-      GIT_FILES = [];
-      BUFFER_COUNT = 0;
-      await env.PROGRESS_KV.delete(KV_BUFFER_KEY);
-      await env.PROGRESS_KV.delete(KV_COUNT_KEY);
-    } catch (err) {
-      console.error("commitGitFiles error:", err);
+      await env.PROGRESS_KV.delete(`progress:${animeId}`);
+      await env.PROGRESS_KV.put("anime_progress", String(animeId));
+    } catch (e) {
+      console.error("Failed to update progress KV after last:", e);
     }
   }
-
-  if (body.last === true) {
-    await env.PROGRESS_KV.delete(`progress:${animeId}`);
-    await env.PROGRESS_KV.put("anime_progress", String(animeId));
-  }
 }
-
 function removeNulls(obj) {
   const clean = {};
   for (const k in obj) if (obj[k] !== null && obj[k] !== undefined) clean[k] = obj[k];
@@ -427,107 +465,4 @@ function toBase64Utf8(str) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
-}
-async function prepareExportFilesFromGitFiles(env) {
-  const filesMap = new Map();
-  for (const f of (GIT_FILES || [])) {
-    filesMap.set(f.path, String(f.content));
-  }
-  for (const idxPath in INDEX_CACHE) {
-    const rows = INDEX_CACHE[idxPath] || [];
-    const content = rows.map(r => JSON.stringify(r)).join("\n") + "\n";
-    filesMap.set(idxPath, content);
-  }
-  env.__exportFiles = [];
-  for (const [path, content] of filesMap.entries()) {
-    env.__exportFiles.push({
-      path,
-      content: toBase64Utf8(String(content))
-    });
-  }
-}
-async function commitGitFiles(env) {
-  if (!GIT_FILES || GIT_FILES.length === 0) {
-    console.log("No files to commit");
-    GIT_FILES = [];
-    BUFFER_COUNT = 0;
-    await env.PROGRESS_KV.delete(KV_BUFFER_KEY);
-    await env.PROGRESS_KV.delete(KV_COUNT_KEY);
-    return;
-  }
-  if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) {
-    throw new Error("Missing GITHUB_TOKEN, GITHUB_OWNER or GITHUB_REPO in environment");
-  }
-  await prepareExportFilesFromGitFiles(env);
-  async function commitExportLocal(env) {
-    const repo = `${env.GITHUB_OWNER}/${env.GITHUB_REPO}`;
-    const repoUrl = `https://api.github.com/repos/${repo}`;
-    const headers = {
-      Authorization: `token ${env.GITHUB_TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-      "User-Agent": "cf-worker"
-    };
-    const repoRes = await countedFetch(repoUrl, { headers });
-    await ensureGithubOk(repoRes, "get repo");
-    const repoData = await repoRes.json();
-    const branchName = repoData.default_branch || "main";
-    const refRes = await countedFetch(`${repoUrl}/git/ref/heads/${branchName}`, { headers });
-    await ensureGithubOk(refRes, "get ref");
-    const refData = await refRes.json();
-    const latestCommitSha = refData.object.sha;
-    const commitRes = await countedFetch(`${repoUrl}/git/commits/${latestCommitSha}`, { headers });
-    await ensureGithubOk(commitRes, "get commit");
-    const commitData = await commitRes.json();
-    const baseTree = commitData.tree.sha;
-    const files = env.__exportFiles || [];
-    const tree = files.map(file => ({
-      path: file.path,
-      mode: "100644",
-      type: "blob",
-      content: new TextDecoder().decode(
-        Uint8Array.from(atob(file.content), c => c.charCodeAt(0))
-      )
-    }));
-    const treeRes = await countedFetch(`${repoUrl}/git/trees`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        base_tree: baseTree,
-        tree
-      })
-    });
-    await ensureGithubOk(treeRes, "create tree");
-    const treeData = await treeRes.json();
-    const newCommitRes = await countedFetch(`${repoUrl}/git/commits`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        message: `Upload ${files.length} files`,
-        tree: treeData.sha,
-        parents: [latestCommitSha]
-      })
-    });
-    await ensureGithubOk(newCommitRes, "create commit");
-    const newCommitData = await newCommitRes.json();
-    const refUpdate = await countedFetch(`${repoUrl}/git/refs/heads/${branchName}`, {
-      method: "PATCH",
-      headers,
-      body: JSON.stringify({ sha: newCommitData.sha })
-    });
-    await ensureGithubOk(refUpdate, "update ref");
-    console.log("Committed", files.length, "files to repo.");
-  }
-  try {
-    await commitExportLocal(env);
-    GIT_FILES = [];
-    BUFFER_COUNT = 0;
-    for (const k in INDEX_CACHE) delete INDEX_CACHE[k];
-    await env.PROGRESS_KV.delete(KV_BUFFER_KEY);
-    await env.PROGRESS_KV.delete(KV_COUNT_KEY);
-    env.__exportFiles = [];
-  } catch (err) {
-    console.error("commitGitFiles (new) error:", err);
-    throw err;
-  }
-}
+        }
