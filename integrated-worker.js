@@ -42,7 +42,7 @@ async function getBufferCount(env) {
     return 0;
   }
 }
-async function clearBuffer(env) 
+async function clearBuffer(env) {
   try {
     await env.PROGRESS_KV.delete(GIT_BUFFER_KV_KEY);
     await env.PROGRESS_KV.put(GIT_BUFFER_COUNT_KEY, "0");
