@@ -152,8 +152,6 @@ async function runScheduled(env, db) {
   }
   let skipCount = 0, MAX_SKIP = 12;
   for (let iteration = 0; iteration < 3; iteration++) {
-  let skipCount = 0, MAX_SKIP = 12;
-  for (let iteration = 0; iteration < 3; iteration++) {
     guard();
     const res = await db.execute({
       sql: `SELECT mal_id, id, title FROM anime_info WHERE id > ? AND mal_id IS NOT NULL ORDER BY id LIMIT 1`,
@@ -253,6 +251,7 @@ async function runScheduled(env, db) {
       console.error("Failed saving KV buffer:", e);
     }
   }
+}
 async function processCharactersBatch(body, env) {
   guard();
   if (!body) throw new Error("No body");
@@ -267,7 +266,7 @@ async function processCharactersBatch(body, env) {
   }
   for (const characterId of charIds) {
     try {
-      const full = await fetchCharacterDetails(characterId);
+      const full = await fetchCharacterDetails(characterId, env);
       const payload = {
         animeId,
         animeMalId,
@@ -295,7 +294,7 @@ async function processCharactersBatch(body, env) {
     }
   }
 }
-async function fetchCharacterDetails(characterId) {
+async function fetchCharacterDetails(characterId, env) {
   try {
     let res = await countedFetch(`https://api.jikan.moe/v4/characters/${characterId}/full`);
     if (res.status === 404) return {};
@@ -595,4 +594,4 @@ function toBase64Utf8(str) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
-            }
+                                }
