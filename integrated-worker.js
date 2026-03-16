@@ -8,7 +8,7 @@ let subrequestCounter = 0;
 const INDEX_CACHE = {};
 const GIT_BUFFER_KV_KEY = "git_buffer_files";    
 const GIT_BUFFER_COUNT_KEY = "git_buffer_count";     
-const GIT_BUFFER_FLUSH_THRESHOLD = 500;             
+const GIT_BUFFER_FLUSH_THRESHOLD = 150;             
 async function getBuffer(env) {
   try {
     const raw = await env.PROGRESS_KV.get(GIT_BUFFER_KV_KEY);
