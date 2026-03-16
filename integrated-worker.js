@@ -251,7 +251,6 @@ async function runScheduled(env, db) {
       console.error("Failed saving KV buffer:", e);
     }
   }
-}
 async function processCharactersBatch(body, env) {
   guard();
   if (!body) throw new Error("No body");
