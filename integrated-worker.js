@@ -125,31 +125,33 @@ async function saveProgress(env, animeId, idx) {
   await env.PROGRESS_KV.put(`progress:${animeId}`, String(idx));
 }
 async function runScheduled(env, db) {
-  const lastId = (await getAnimeProgress(env)) || 0;
+  let lastId = (await getAnimeProgress(env)) || 0;
   try {
     const bufCount = await getBufferCount(env);
-    if (bufCount < GIT_BUFFER_FLUSH_THRESHOLD) return;
-    console.log(
-      `Buffer count ${bufCount} >= ${GIT_BUFFER_FLUSH_THRESHOLD} — flushing buffer to GitHub now.`
-    );
-    const allFiles = await getBuffer(env);
-    if (!allFiles.length) return;
-    const chunk = allFiles.slice(0, GIT_BUFFER_FLUSH_THRESHOLD);
-    const remaining = allFiles.slice(GIT_BUFFER_FLUSH_THRESHOLD);
-    env.__exportFiles = chunk;
-    try {
-      await commitExport(env);
-      await saveBuffer(env, remaining);
+    if (bufCount >= GIT_BUFFER_FLUSH_THRESHOLD) {
       console.log(
-        `Committed ${chunk.length} files. Remaining buffer: ${remaining.length}`
+        `Buffer count ${bufCount} >= ${GIT_BUFFER_FLUSH_THRESHOLD} — flushing buffer to GitHub now.`
       );
-    } catch (e) {
-      console.error("Flush commit failed:", e);
+      const allFiles = await getBuffer(env);
+      if (allFiles.length) {
+        const chunk = allFiles.slice(0, GIT_BUFFER_FLUSH_THRESHOLD);
+        const remaining = allFiles.slice(GIT_BUFFER_FLUSH_THRESHOLD);
+        env.__exportFiles = chunk;
+        try {
+          await commitExport(env);
+          await saveBuffer(env, remaining);
+          console.log(
+            `Committed ${chunk.length} files. Remaining buffer: ${remaining.length}`);
+        } catch (e) {
+          console.error("Flush commit failed:", e);
+        }
+      }
     }
   } catch (e) {
     console.error("Buffer flush check failed at run start:", e);
   }
-}
+  let skipCount = 0, MAX_SKIP = 12;
+  for (let iteration = 0; iteration < 3; iteration++) {
   let skipCount = 0, MAX_SKIP = 12;
   for (let iteration = 0; iteration < 3; iteration++) {
     guard();
@@ -593,4 +595,4 @@ function toBase64Utf8(str) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
-}
+            }
