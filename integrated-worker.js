@@ -286,7 +286,7 @@ async function processCharactersBatch(body, env) {
   for (const characterId of charIds) {
     try {
       const full = await fetchCharacterDetails(characterId, env);
-      payload = {
+     const payload = {
         animeId,
         animeMalId,
         animeTitle: title,
