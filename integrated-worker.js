@@ -552,7 +552,6 @@ async function commitExport(env) {
       await new Promise(r => setTimeout(r, 600 * attempt));
     }
   }
-}
   function decodeBase64Utf8(base64) {
     try {
       const binary = atob(base64);
