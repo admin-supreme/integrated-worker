@@ -277,6 +277,7 @@ if (env.__kvBuffer && env.__kvBuffer.length > 0) {
     console.error("Failed saving KV buffer:", e);
   }
 }
+}
 async function processCharactersBatch(body, env) {
   guard();
   if (!body) throw new Error("No body");
