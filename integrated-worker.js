@@ -629,7 +629,6 @@ async function commitExport(env) {
     // Always clear export buffer
     env.__exportFiles = [];
   }
-}
 async function processSingleCharacterPayload(body, env) {
   const repo =
     env.GITHUB_REPO && env.GITHUB_REPO.includes("/")
