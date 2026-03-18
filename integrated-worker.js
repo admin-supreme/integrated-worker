@@ -187,10 +187,7 @@ try {
     await saveBuffer(env, remainingFiles);
     console.log(`Flush partial. Remaining buffer: ${remainingFiles.length}`);
     return; 
-  }
-} catch (e) {
-  console.error("Flush check failed:", e);
-}
+    }
   let skipCount = 0;
 const MAX_SKIP = 12;
 for (let iteration = 0; iteration < 3; iteration++) {
