@@ -4,7 +4,6 @@ let subrequestCounter = 0;
 const CHARACTER_FETCH_LIMIT = 40;
 const MAX_REQUESTS = 49;
 const SUBREQUEST_LIMIT = 49;
-const COMMIT_THRESHOLD = 40;
 const MAX_CHUNKS_PER_RUN = 8;
 const GIT_BUFFER_KV_KEY = "git_buffer_files";
 const GIT_BUFFER_COUNT_KEY = "git_buffer_count";
@@ -136,7 +135,6 @@ try {
   let skipCount = 0;
 const MAX_SKIP = 12;
 for (let iteration = 0; iteration < 10; iteration++) {
-  let payload = undefined;
   guard();
   try {
     const res = await db.execute({
