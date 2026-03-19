@@ -1269,3 +1269,4 @@ async function processSingleCharacterPayload(body, env) {
     };
   }
 }
+}
