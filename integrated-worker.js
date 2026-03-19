@@ -1179,17 +1179,6 @@ async function uploadChunk(env, index, rows) {
     content: toBase64Utf8(content)
   });
 }
-function removeNulls(obj) {
-  const clean = {};
-  for (const k in obj) if (obj[k] !== null && obj[k] !== undefined) clean[k] = obj[k];
-  return clean;
-}
-function getIndexLetter(title) {
-  if (!title) return "#";
-  const first = String(title)[0]?.toLowerCase();
-  if (/[a-z]/.test(first)) return first;
-  return "#";
-}
 function toBase64Utf8(str) {
   const bytes = new TextEncoder().encode(str);
   let binary = "";
@@ -1197,14 +1186,4 @@ function toBase64Utf8(str) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
-}
-function decodeBase64Utf8(base64) {
-  try {
-    const binary = atob(base64);
-    const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
-    return new TextDecoder().decode(bytes);
-  } catch (e) {
-    console.error("decodeBase64Utf8 failed:", e);
-    return "";
-  }
 }
