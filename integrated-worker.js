@@ -626,42 +626,6 @@ put("image", chooseValue(existingObj.image, extracted.image));
 
   return merged;
 }
-function parseAbout(text){
-  const result = { height_cm: null, weight_kg: null };
-  const attributes = {};
-  const lines = String(text || "").split("\n");
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const kv = trimmed.match(/^([A-Za-z\s]+)\s*:\s*(.+)$/);
-    if (kv) {
-      let key = kv[1].toLowerCase().trim();
-      let value = kv[2].trim();
-      key = key.replace(/\s+/g, "").replace(/[^a-z0-9]/g, "");
-      if (key === "height") {
-        let m = value.match(/(\d+)\s*cm/i);
-        if (m) result.height_cm = parseInt(m[1]);
-        else {
-          let ftm = value.match(/(\d+)'\s*(\d+)/);
-          if (ftm) {
-            const ft = parseInt(ftm[1]), inch = parseInt(ftm[2]);
-            result.height_cm = Math.round(ft * 30.48 + inch * 2.54);
-          }
-        }
-      }
-      if (key === "weight") {
-        let m = value.match(/(\d+)\s*kg/i);
-        if (m) result.weight_kg = parseInt(m[1]);
-        else {
-          let lbs = value.match(/(\d+)\s*lb/i);
-          if (lbs) result.weight_kg = Math.round(parseInt(lbs[1]) * 0.453592);
-        }
-      }
-      attributes[key] = value;
-    }
-  }
-  return { ...attributes, ...result, cleaned_about: String(text || "").trim() };
-}
 async function commitExport(env, opts = {}) {
   const MAX_ATTEMPTS = opts.maxAttempts ?? 4;
   const BATCH_SIZE = Number(opts.batchSize ?? env.EXPORT_BATCH_SIZE ?? 20);
