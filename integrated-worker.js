@@ -28,33 +28,6 @@ async function saveBuffer(env, arr) {
     throw e;
   }
 }
-async function appendToBuffer(env, fileObj) {
-  if (!env.__kvBuffer) {
-    env.__kvBuffer = await getBuffer(env);
-  }
-  env.__kvBuffer.push(fileObj);
-if (env.__kvBuffer.length % 10 === 0) {
-  await saveBuffer(env, env.__kvBuffer);
-}
-}
-async function getBufferCount(env) {
-  try {
-    const v = await env.PROGRESS_KV.get(GIT_BUFFER_COUNT_KEY);
-    return v ? parseInt(v, 10) : 0;
-  } catch (e) {
-    console.error("getBufferCount error:", e);
-    return 0;
-  }
-}
-async function clearBuffer(env) {
-  try {
-    await env.PROGRESS_KV.delete(GIT_BUFFER_KV_KEY);
-    await env.PROGRESS_KV.put(GIT_BUFFER_COUNT_KEY, "0");
-  } catch (e) {
-    console.error("clearBuffer error:", e);
-    throw e;
-  }
-}
 function guard() {
   requestCounter++;
   if (requestCounter >= MAX_REQUESTS) {
