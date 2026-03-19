@@ -156,7 +156,7 @@ for (let iteration = 0; iteration < 10; iteration++) {
         console.log("Skip limit reached");
         break;
       }
-      brea;
+      break;
     }
     try {
       const url = `https://api.jikan.moe/v4/anime/${anime.mal_id}/characters`;
