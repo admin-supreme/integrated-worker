@@ -868,80 +868,48 @@ while (scanAttempts < MAX_SCAN_ATTEMPTS) {
     tryCurrentProgressFirst = false;
     continue;
   }
+  if (notFound) {
+    console.log(`Jikan 404 for anime mal_id=${mal_id}`);
+    await markSkippedAnime(id);
+    tryCurrentProgressFirst = false;
+    continue;
+  }
+  const total_characters = extractCharacterIds(jikanJson);
+  if (total_characters.length === 0) {
+    console.log(`No character IDs returned by Jikan for anime id=${id}, mal_id=${mal_id}`);
+    await markSkippedAnime(id);
+    tryCurrentProgressFirst = false;
+    continue;
+  }
+  const processedSet = await readProcessedCharacterSet(id);
+  const remainingCharacters = total_characters.filter((charId) => !processedSet.has(charId));
+  if (remainingCharacters.length === 0) {
+    console.log(`All characters already processed for anime id=${id}, mal_id=${mal_id}`);
+    await markSkippedAnime(id);
+    tryCurrentProgressFirst = false;
+    continue;
+  }
+  const mal_character_id = remainingCharacters.slice(0, LIMIT);
+  if (mal_character_id.length === 0) {
+    await markSkippedAnime(id);
+    tryCurrentProgressFirst = false;
+    continue;
+  }
+  const payload = {
+    id,
+    mal_id,
+    mal_character_id,
+    total_characters,
+    title,
+  };
+  env.__importCharactersPayload = payload;
+  console.log(
+    `importCharacters ready: anime id=${id}, mal_id=${mal_id}, total=${total_characters.length}, remaining=${remainingCharacters.length}, batch=${mal_character_id.length}`
+  );
+  return payload;
 }
-    const anime = animeRes.rows[0];
-    const id = normalizeAnimeId(anime?.id);
-    const rowCursor = toIntId(anime?.id);
-    const mal_id = toIntId(anime?.mal_id);
-    const title = typeof anime?.title === "string" ? anime.title : "";
-    if (rowCursor !== null) {
-      cursorId = rowCursor;
-    } else {
-      cursorId += 1;
-    }
-    if (id === null) {
-      console.log("Invalid anime id, skipping row:", anime);
-      tryCurrentProgressFirst = false;
-      continue;
-    }
-    if (mal_id === null) {
-      console.log("Invalid mal_id in SQL row, skipping row:", anime);
-      await markSkippedAnime(id);
-      tryCurrentProgressFirst = false;
-      continue;
-    }
-    const url = `https://api.jikan.moe/v4/anime/${mal_id}/characters`;
-    let notFound = false;
-    let jikanJson = null;
-    try {
-      ({ notFound, data: jikanJson } = await fetchJikanJson(url));
-    } catch (err) {
-      if (err?.message === "SAFE_STOP") throw err;
-      console.warn(`Jikan fetch failed for anime id=${id}, mal_id=${mal_id}. Skipping anime.`, err);
-      await markSkippedAnime(id);
-      tryCurrentProgressFirst = false;
-      continue;
-    }
-    if (notFound) {
-      console.log(`Jikan 404 for anime mal_id=${mal_id}`);
-      await markSkippedAnime(id);
-      tryCurrentProgressFirst = false;
-      continue;
-    }
-    const total_characters = extractCharacterIds(jikanJson);
-    if (total_characters.length === 0) {
-      console.log(`No character IDs returned by Jikan for anime id=${id}, mal_id=${mal_id}`);
-      await markSkippedAnime(id);
-      tryCurrentProgressFirst = false;
-      continue;
-    }
-    const processedSet = await readProcessedCharacterSet(id);
-    const remainingCharacters = total_characters.filter((charId) => !processedSet.has(charId));
-    if (remainingCharacters.length === 0) {
-      console.log(`All characters already processed for anime id=${id}, mal_id=${mal_id}`);
-      await markSkippedAnime(id);
-      tryCurrentProgressFirst = false;
-      continue;
-    }
-    const mal_character_id = remainingCharacters.slice(0, LIMIT);
-    if (mal_character_id.length === 0) {
-      await markSkippedAnime(id);
-      tryCurrentProgressFirst = false;
-      continue;
-    }
-    const payload = {
-      id,
-      mal_id,
-      mal_character_id,
-      total_characters,
-      title,
-    };
-    env.__importCharactersPayload = payload;
-    console.log(
-      `importCharacters ready: anime id=${id}, mal_id=${mal_id}, total=${total_characters.length}, remaining=${remainingCharacters.length}, batch=${mal_character_id.length}`
-    );
-    return payload;
-  return null;}
+return null;
+}
 async function fetchSingleCharacter(body = {}, env) {
   guard();
   const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
