@@ -402,6 +402,15 @@ async function indexPipeline(env, db, opts = {}) {
         limit: CHARACTER_LIMIT,
         progressState: opts.progressState,
       });
+      if (
+        !payload ||
+        payload.skipped === true ||
+        !Array.isArray(payload.mal_character_id) ||
+        payload.mal_character_id.length === 0
+      ) {
+        console.log("indexPipeline: empty/skipped anime payload, moving to next id");
+        continue;
+      }
     } catch (err) {
       console.error("indexPipeline: importCharacters failed:", err);
       return {
@@ -645,16 +654,19 @@ async function importCharacters(env, db, opts = {}) {
   const LIMIT = Number.isFinite(Number(opts.limit)) ? Number(opts.limit) : 20;
   const MAX_RETRIES = Number.isFinite(Number(opts.maxRetries)) ? Number(opts.maxRetries) : 3;
   const RETRY_DELAY_MS = Number.isFinite(Number(opts.retryDelayMs)) ? Number(opts.retryDelayMs) : 1500;
+  const MAX_SCAN_ATTEMPTS = Number.isFinite(Number(opts.maxScanAttempts))
+    ? Math.max(1, Math.trunc(Number(opts.maxScanAttempts)))
+    : Math.max(LIMIT * 20, 100);
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const toIntId = (value) => {
     const n = Number(value);
     return Number.isInteger(n) && n > 0 ? n : null;
   };
   const normalizeAnimeId = (value) => {
-  if (value === null || value === undefined) return null;
-  const s = String(value).trim();
-  return s ? s : null;
-};
+    if (value === null || value === undefined) return null;
+    const s = String(value).trim();
+    return s ? s : null;
+  };
   const uniqueInts = (values) => {
     const out = [];
     const seen = new Set();
@@ -688,8 +700,7 @@ async function importCharacters(env, db, opts = {}) {
         if (Array.isArray(parsed.characters)) return uniqueInts(parsed.characters);
         if (Array.isArray(parsed.ids)) return uniqueInts(parsed.ids);
       }
-    } catch (_) {
-    }
+    } catch (_) {}
     return uniqueInts(
       text
         .split(/[\s,]+/g)
@@ -716,6 +727,19 @@ async function importCharacters(env, db, opts = {}) {
       }
     }
     return new Set();
+  };
+  const markSkippedAnime = async (animeId) => {
+    const kv = env?.PROGRESS_KV;
+    if (!kv || typeof kv.put !== "function") return;
+    try {
+      await Promise.all([
+        kv.put("anime_id_progress", String(animeId)),
+        kv.put("total_characters", "[]"),
+        kv.put("processed_characters", "[]"),
+      ]);
+    } catch (err) {
+      console.warn("markSkippedAnime failed:", err);
+    }
   };
   const fetchJikanJson = async (url) => {
     let lastError = null;
@@ -777,101 +801,117 @@ async function importCharacters(env, db, opts = {}) {
     return uniqueInts(ids);
   };
   const progressState = opts.progressState ?? await readProgressState(env);
-  const lastDoneOrCurrentId = progressState.animeId || 0;
-  const isIncompleteProgress =
+  let cursorId = toIntId(progressState.animeId) ?? 0;
+  let tryCurrentProgressFirst =
     progressState.animeId !== null &&
     progressState.totalCharacters.length > 0 &&
     progressState.processedCharacters.length < progressState.totalCharacters.length;
-  let animeRes = null;
-  if (isIncompleteProgress) {
-    animeRes = await db.execute({
-      sql: `
-        SELECT id, mal_id, title
-        FROM anime_info
-        WHERE id = ? AND mal_id IS NOT NULL
-        LIMIT 1
-      `,
-      args: [progressState.animeId],
-    });
+  let scanAttempts = 0;
+  while (scanAttempts < MAX_SCAN_ATTEMPTS) {
+    scanAttempts++;
+    let animeRes = null;
+    if (tryCurrentProgressFirst && progressState.animeId !== null) {
+      animeRes = await db.execute({
+        sql: `
+          SELECT id, mal_id, title
+          FROM anime_info
+          WHERE id = ? AND mal_id IS NOT NULL
+          LIMIT 1
+        `,
+        args: [progressState.animeId],
+      });
+    }
+    if (!animeRes?.rows?.length) {
+      animeRes = await db.execute({
+        sql: `
+          SELECT id, mal_id, title
+          FROM anime_info
+          WHERE id > ? AND mal_id IS NOT NULL
+          ORDER BY id ASC
+          LIMIT 1
+        `,
+        args: [cursorId],
+      });
+      tryCurrentProgressFirst = false;
+    }
+    if (!animeRes?.rows?.length) {
+      console.log("No anime row found after cursor:", cursorId);
+      return null;
+    }
+    const anime = animeRes.rows[0];
+    const id = normalizeAnimeId(anime?.id);
+    const rowCursor = toIntId(anime?.id);
+    const mal_id = toIntId(anime?.mal_id);
+    const title = typeof anime?.title === "string" ? anime.title : "";
+    if (rowCursor !== null) {
+      cursorId = rowCursor;
+    } else {
+      cursorId += 1;
+    }
+    if (id === null) {
+      console.log("Invalid anime id, skipping row:", anime);
+      tryCurrentProgressFirst = false;
+      continue;
+    }
+    if (mal_id === null) {
+      console.log("Invalid mal_id in SQL row, skipping row:", anime);
+      await markSkippedAnime(id);
+      tryCurrentProgressFirst = false;
+      continue;
+    }
+    const url = `https://api.jikan.moe/v4/anime/${mal_id}/characters`;
+    let notFound = false;
+    let jikanJson = null;
+    try {
+      ({ notFound, data: jikanJson } = await fetchJikanJson(url));
+    } catch (err) {
+      if (err?.message === "SAFE_STOP") throw err;
+      console.warn(`Jikan fetch failed for anime id=${id}, mal_id=${mal_id}. Skipping anime.`, err);
+      await markSkippedAnime(id);
+      tryCurrentProgressFirst = false;
+      continue;
+    }
+    if (notFound) {
+      console.log(`Jikan 404 for anime mal_id=${mal_id}`);
+      await markSkippedAnime(id);
+      tryCurrentProgressFirst = false;
+      continue;
+    }
+    const total_characters = extractCharacterIds(jikanJson);
+    if (total_characters.length === 0) {
+      console.log(`No character IDs returned by Jikan for anime id=${id}, mal_id=${mal_id}`);
+      await markSkippedAnime(id);
+      tryCurrentProgressFirst = false;
+      continue;
+    }
+    const processedSet = await readProcessedCharacterSet(id);
+    const remainingCharacters = total_characters.filter((charId) => !processedSet.has(charId));
+    if (remainingCharacters.length === 0) {
+      console.log(`All characters already processed for anime id=${id}, mal_id=${mal_id}`);
+      await markSkippedAnime(id);
+      tryCurrentProgressFirst = false;
+      continue;
+    }
+    const mal_character_id = remainingCharacters.slice(0, LIMIT);
+    if (mal_character_id.length === 0) {
+      await markSkippedAnime(id);
+      tryCurrentProgressFirst = false;
+      continue;
+    }
+    const payload = {
+      id,
+      mal_id,
+      mal_character_id,
+      total_characters,
+      title,
+    };
+    env.__importCharactersPayload = payload;
+    console.log(
+      `importCharacters ready: anime id=${id}, mal_id=${mal_id}, total=${total_characters.length}, remaining=${remainingCharacters.length}, batch=${mal_character_id.length}`
+    );
+    return payload;
   }
-  if (!animeRes?.rows?.length) {
-        animeRes = await db.execute({
-      sql: `
-        SELECT id, mal_id, title
-        FROM anime_info
-        WHERE id > ? AND mal_id IS NOT NULL
-        ORDER BY id ASC
-        LIMIT 1
-      `,
-      args: [lastDoneOrCurrentId],
-    });
-  }
-  if (!animeRes?.rows?.length) {
-    console.log("No anime row found after last progress:", lastDoneOrCurrentId);
-    return null;
-  }
-  const anime = animeRes.rows[0];
-  const id = normalizeAnimeId(anime?.id);
-const mal_id = toIntId(anime?.mal_id);
-const title = typeof anime?.title === "string" ? anime.title : "";
-if (id === null) {
-  console.log("Invalid anime id, skipping row:", anime);
   return null;
-}
-  if (mal_id === null) {
-    console.log("Invalid mal_id in SQL row, skipping row:", anime);
-    return {
-      id,
-      mal_id: null,
-      mal_character_id: [],
-      total_characters: [],
-      title,
-      skipped: true,
-      reason: "invalid_mal_id",
-    };
-  }
-  const url = `https://api.jikan.moe/v4/anime/${mal_id}/characters`;
-  const { notFound, data: jikanJson } = await fetchJikanJson(url);
-  if (notFound) {
-    console.log(`Jikan 404 for anime mal_id=${mal_id}`);
-    return {
-      id,
-      mal_id,
-      mal_character_id: [],
-      total_characters: [],
-      title,
-      skipped: true,
-      reason: "jikan_404",
-    };
-  }
-  const total_characters = extractCharacterIds(jikanJson);
-  if (total_characters.length === 0) {
-    console.log(`No character IDs returned by Jikan for anime id=${id}, mal_id=${mal_id}`);
-    return {
-      id,
-      mal_id,
-      mal_character_id: [],
-      total_characters: [],
-      title,
-      skipped: true,
-      reason: "no_characters",
-    };
-  }
-  const processedSet = await readProcessedCharacterSet(id);
-  const remainingCharacters = total_characters.filter((charId) => !processedSet.has(charId));
-  const mal_character_id = remainingCharacters.slice(0, LIMIT);
-  const payload = {
-    id,
-    mal_id,
-    mal_character_id,
-    total_characters,
-    title,
-  };
-  env.__importCharactersPayload = payload;
-  console.log(
-    `importCharacters ready: anime id=${id}, mal_id=${mal_id}, total=${total_characters.length}, remaining=${remainingCharacters.length}, batch=${mal_character_id.length}`
-  );
-  return payload;
 }
 async function fetchSingleCharacter(body = {}, env) {
   guard();
