@@ -2,7 +2,7 @@ import { createClient } from "@libsql/client/web";
 let requestCounter = 0;
 let subrequestCounter = 0; 
 const ANIME_COUNT_KEY = "number_of_anime";
-const CHARACTER_FETCH_LIMIT = 20;
+const CHARACTER_FETCH_LIMIT = 25;
 const MAX_REQUESTS = 49;
 const SUBREQUEST_LIMIT = 49;
 const MAX_CHUNKS_PER_RUN = 8;
