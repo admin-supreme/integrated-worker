@@ -2,7 +2,7 @@ import { createClient } from "@libsql/client/web";
 let requestCounter = 0;
 let subrequestCounter = 0; 
 const ANIME_COUNT_KEY = "number_of_anime";
-const CHARACTER_FETCH_LIMIT = 40;
+const CHARACTER_FETCH_LIMIT = 20;
 const MAX_REQUESTS = 49;
 const SUBREQUEST_LIMIT = 49;
 const MAX_CHUNKS_PER_RUN = 8;
@@ -16,6 +16,12 @@ function deepClone(value) {
     } catch {}
   }
   return JSON.parse(JSON.stringify(value));
+}
+function toPositiveInt(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.trunc(n);
+  return i > 0 ? i : null;
 }
 async function saveProgressId(env, memory = null) {
   const KV = env?.PROGRESS_KV;
@@ -390,149 +396,140 @@ async function indexPipeline(env, db, opts = {}) {
       error: "db_unavailable",
     };
   }
-  let chunksDone = 0;
+let chunksDone = 0;
   const chunkResults = [];
-  while (chunksDone < MAX_CHUNKS) {
-    let payload = null;
-    let fetched = null;
-    let uploadResult = null;
-    let saveResult = null;
-    try {
-      payload = await importCharacters(env, db, {
-        limit: CHARACTER_LIMIT,
-        progressState: opts.progressState,
-      });
-      if (
-        !payload ||
-        payload.skipped === true ||
-        !Array.isArray(payload.mal_character_id) ||
-        payload.mal_character_id.length === 0
-      ) {
-        console.log("indexPipeline: empty/skipped anime payload, moving to next id");
-        continue;
-      }
-    } catch (err) {
-      console.error("indexPipeline: importCharacters failed:", err);
-      return {
-        ...baseResult,
-        ok: false,
-        action: "process",
-        step: "importCharacters",
-        chunksDone,
-        error: String(err?.message || err),
-      };
-    }
-    if (!payload) {
+  let payload = null;
+  let fetched = null;
+  let uploadResult = null;
+  let saveResult = null;
+  try {
+    payload = await importCharacters(env, db, {
+      limit: CHARACTER_LIMIT,
+    });
+    if (
+      !payload ||
+      payload.skipped === true ||
+      !Array.isArray(payload.mal_character_id) ||
+      payload.mal_character_id.length === 0
+    ) {
+      console.log("indexPipeline: empty/skipped anime payload");
       return {
         ...baseResult,
         action: "process",
         done: true,
-        chunksDone,
+        chunksDone: 0,
         chunkResults,
       };
     }
-    try {
-      fetched = await fetchSingleCharacter(
-        {
-          animeId: payload.id,
-          characterMalIds: payload.mal_character_id,
-        },
-        env
-      );
-    } catch (err) {
-      if (err?.message === "SAFE_STOP") {
-        console.warn("indexPipeline: SAFE_STOP during fetchSingleCharacter");
-        return {
-          ...baseResult,
-          action: "process",
-          stopped: true,
-          reason: "SAFE_STOP",
-          chunksDone,
-          chunkResults,
-          animeId: payload?.id ?? null,
-        };
-      }
-      console.error("indexPipeline: fetchSingleCharacter failed:", err);
-      return {
-        ...baseResult,
-        ok: false,
-        action: "process",
-        step: "fetchSingleCharacter",
-        chunksDone,
-        animeId: payload?.id ?? null,
-        error: String(err?.message || err),
-      };
-    }
-    try {
-      uploadResult = await uploadBuffer(fetched, env);
-    } catch (err) {
-      if (err?.message === "SAFE_STOP") {
-        console.warn("indexPipeline: SAFE_STOP during uploadBuffer");
-        return {
-          ...baseResult,
-          action: "process",
-          stopped: true,
-          reason: "SAFE_STOP",
-          chunksDone,
-          chunkResults,
-          animeId: payload?.id ?? null,
-        };
-      }
-      console.error("indexPipeline: uploadBuffer failed:", err);
-      return {
-        ...baseResult,
-        ok: false,
-        action: "process",
-        step: "uploadBuffer",
-        chunksDone,
-        animeId: payload?.id ?? null,
-        error: String(err?.message || err),
-      };
-    }
-    const processedCharacters = Array.isArray(fetched?.characters_buffer)
-      ? fetched.characters_buffer
-          .map((item) => item?.mal_character_id)
-          .filter((v) => Number.isInteger(v) && v > 0)
-      : [];
-    try {
-      saveResult = await saveProgressId(env, {
-        id: payload.id,
-        total_characters: payload.total_characters,
-        processed_characters: processedCharacters,
-      });
-    } catch (err) {
-      console.error("indexPipeline: saveProgressId threw:", err);
-      saveResult = {
-        ok: false,
-        reason: "exception",
-        error: String(err?.message || err),
-      };
-    }
-    chunkResults.push({
-      animeId: payload.id,
-      malId: payload.mal_id ?? null,
-      fetchedCount: Array.isArray(fetched?.characters_buffer)
-        ? fetched.characters_buffer.length
-        : 0,
-      processedCharacters: processedCharacters.length,
-      uploadResult,
-      saveResult,
-    });
-    console.log("indexPipeline chunk result:", {
-      animeId: payload.id,
-      uploadResult,
-      saveResult,
-      processedCharacters: processedCharacters.length,
-    });
-    chunksDone++;
-    if (processedCharacters.length === 0) {
-      break;
-    }
+  } catch (err) {
+    console.error("indexPipeline: importCharacters failed:", err);
+    return {
+      ...baseResult,
+      ok: false,
+      action: "process",
+      step: "importCharacters",
+      chunksDone: 0,
+      error: String(err?.message || err),
+    };
   }
+  try {
+    fetched = await fetchSingleCharacter(
+      {
+        animeId: payload.id,
+        characterMalIds: payload.mal_character_id,
+        limit: CHARACTER_LIMIT,
+      },
+      env
+    );
+  } catch (err) {
+    if (err?.message === "SAFE_STOP") {
+      console.warn("indexPipeline: SAFE_STOP during fetchSingleCharacter");
+      return {
+        ...baseResult,
+        action: "process",
+        stopped: true,
+        reason: "SAFE_STOP",
+        chunksDone: 0,
+        chunkResults,
+        animeId: payload?.id ?? null,
+      };
+    }
+    console.error("indexPipeline: fetchSingleCharacter failed:", err);
+    return {
+      ...baseResult,
+      ok: false,
+      action: "process",
+      step: "fetchSingleCharacter",
+      chunksDone: 0,
+      animeId: payload?.id ?? null,
+      error: String(err?.message || err),
+    };
+  }
+  try {
+    uploadResult = await uploadBuffer(fetched, env);
+  } catch (err) {
+    if (err?.message === "SAFE_STOP") {
+      console.warn("indexPipeline: SAFE_STOP during uploadBuffer");
+      return {
+        ...baseResult,
+        action: "process",
+        stopped: true,
+        reason: "SAFE_STOP",
+        chunksDone: 0,
+        chunkResults,
+        animeId: payload?.id ?? null,
+      };
+    }
+    console.error("indexPipeline: uploadBuffer failed:", err);
+    return {
+      ...baseResult,
+      ok: false,
+      action: "process",
+      step: "uploadBuffer",
+      chunksDone: 0,
+      animeId: payload?.id ?? null,
+      error: String(err?.message || err),
+    };
+  }
+  const processedCharacters = Array.isArray(fetched?.characters_buffer)
+    ? fetched.characters_buffer
+        .map((item) => item?.mal_character_id)
+        .filter((v) => Number.isInteger(v) && v > 0)
+    : [];
+  try {
+    saveResult = await saveProgressId(env, {
+      id: payload.id,
+      total_characters: payload.total_characters,
+      processed_characters: processedCharacters,
+    });
+  } catch (err) {
+    console.error("indexPipeline: saveProgressId threw:", err);
+    saveResult = {
+      ok: false,
+      reason: "exception",
+      error: String(err?.message || err),
+    };
+  }
+  chunkResults.push({
+    animeId: payload.id,
+    malId: payload.mal_id ?? null,
+    fetchedCount: Array.isArray(fetched?.characters_buffer)
+      ? fetched.characters_buffer.length
+      : 0,
+    processedCharacters: processedCharacters.length,
+    uploadResult,
+    saveResult,
+  });
+  console.log("indexPipeline chunk result:", {
+    animeId: payload.id,
+    uploadResult,
+    saveResult,
+    processedCharacters: processedCharacters.length,
+  });
   return {
     ...baseResult,
     action: "process",
-    chunksDone,
+    chunksDone: 1,
     chunkResults,
   };
 }
@@ -1028,6 +1025,12 @@ async function fetchSingleCharacter(body = {}, env) {
     charIds = toIdArray(body?.characterMalIds ?? body?.characterMalId);
   }
   charIds = [...new Set(charIds)].filter((id) => Number.isInteger(id) && id > 0);
+const characterLimit = Number.isFinite(Number(body?.limit))
+    ? Math.max(1, Math.trunc(Number(body.limit)))
+    : null;
+  if (characterLimit !== null) {
+    charIds = charIds.slice(0, characterLimit);
+  }
   if (charIds.length === 0) {
     throw new Error("No character ids found");
   }
