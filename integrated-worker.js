@@ -7,7 +7,7 @@ const MAX_REQUESTS = 49;
 const SUBREQUEST_LIMIT = 49;
 const MAX_CHUNKS_PER_RUN = 8;
 const GIT_BUFFER_COUNT_KEY = "git_buffer_count";
-const GIT_BUFFER_FLUSH_THRESHOLD = 200;
+const GIT_BUFFER_FLUSH_THRESHOLD = 180;
 function deepClone(value) {
   if (value === null || value === undefined) return value;
   if (typeof structuredClone === "function") {
