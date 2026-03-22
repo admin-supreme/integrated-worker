@@ -7,7 +7,7 @@ const MAX_REQUESTS = 49;
 const SUBREQUEST_LIMIT = 49;
 const MAX_CHUNKS_PER_RUN = 8;
 const GIT_BUFFER_COUNT_KEY = "git_buffer_count";
-const GIT_BUFFER_FLUSH_THRESHOLD = 180;
+const GIT_BUFFER_FLUSH_THRESHOLD = 100;
 function deepClone(value) {
   if (value === null || value === undefined) return value;
   if (typeof structuredClone === "function") {
@@ -167,7 +167,12 @@ if (currentAnimeId === null) {
   }
 } 
 async function clearKv(env, opts = {}) {
-  const KEEP_KEY = "anime_id_progress";
+  const KEEP_KEYS = new Set([
+    "anime_id_progress",
+    "number_of_anime",
+    "processed_characters",
+    "total_characters",
+  ]);
   const kvCandidates = [
     env?.PROGRESS_KV,
     env?.progressKV,
@@ -187,107 +192,117 @@ async function clearKv(env, opts = {}) {
     return {
       ok: false,
       reason: "kv_unavailable",
-      kept_key: KEEP_KEY,
+      kept_keys: [...KEEP_KEYS],
       deleted_count: 0,
+      remaining_number_of_anime: null,
     };
   }
-  const fallbackIdSources = [
-    () => env?.__progressMemory?.id,
-    () => env?.__importCharactersPayload?.id,
-    () => env?.__saveProgressMemory?.id,
-  ];
-  const readKeptValue = async () => {
-    try {
-      const raw = await KV.get(KEEP_KEY);
-      if (raw !== null && raw !== undefined && raw !== "") {
-        return String(raw);
-      }
-    } catch (err) {
-      console.warn("clearKv: failed to read preserved key from KV:", err);
-    }
-    for (const pick of fallbackIdSources) {
-      try {
-        const value = pick();
-        if (value !== null && value !== undefined && value !== "") {
-          return String(value);
-        }
-      } catch (_) {}
-    }
-    return null;
+  const toPositiveInt = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    const i = Math.trunc(n);
+    return i > 0 ? i : null;
   };
-  const preservedValue = await readKeptValue();
-  const listLimit = Math.min(
-    Math.max(Number(opts.listLimit ?? 1000), 1),
-    1000
+  const readCount = async () => {
+    try {
+      const raw = await KV.get("number_of_anime");
+      return toPositiveInt(raw);
+    } catch (err) {
+      console.warn("clearKv: failed reading number_of_anime:", err);
+      return null;
+    }
+  };
+  const listLimit = Math.min(Math.max(toPositiveInt(opts.listLimit) ?? 1000, 1), 1000);
+  const deleteBatchSize = Math.min(Math.max(toPositiveInt(opts.deleteBatchSize) ?? 50, 1), 100);
+  const maxPasses = Math.min(Math.max(toPositiveInt(opts.maxPasses) ?? 2, 1), 5);
+  const flushBatchSize = Math.min(
+    Math.max(
+      toPositiveInt(opts.flushBatchSize) ??
+        toPositiveInt(globalThis.GIT_BUFFER_FLUSH_THRESHOLD) ??
+        500,
+      1
+    ),
+    5000
   );
-  const deleteBatchSize = Math.min(
-    Math.max(Number(opts.deleteBatchSize ?? 50), 1),
-    100
-  );
-  const maxPasses = Math.min(Math.max(Number(opts.maxPasses ?? 2), 1), 5);
+  const currentAnimeCount = await readCount();
+  const targetDeleteCount =
+    currentAnimeCount === null
+      ? flushBatchSize
+      : Math.min(currentAnimeCount, flushBatchSize);
   let deletedCount = 0;
   let scannedCount = 0;
-  let lastRemaining = [];
-  for (let pass = 1; pass <= maxPasses; pass++) {
-    const keysToDelete = [];
+  let remainingSample = [];
+  const collectDeleteCandidates = async () => {
+    const seen = new Set();
+    const candidates = [];
     let cursor = undefined;
-    try {
-      do {
-        const page = await KV.list({ limit: listLimit, cursor });
-        const keys = Array.isArray(page?.keys) ? page.keys : [];
-        for (const entry of keys) {
-          const keyName = entry?.name;
-          if (!keyName || keyName === KEEP_KEY) continue;
-          keysToDelete.push(keyName);
-        }
-        cursor = page?.list_complete ? undefined : page?.cursor;
-      } while (cursor);
-    } catch (err) {
-      console.error("clearKv: KV.list failed:", err);
-      return {
-        ok: false,
-        reason: "kv_list_failed",
-        error: String(err?.message || err),
-        kept_key: KEEP_KEY,
-        deleted_count: deletedCount,
-      };
-    }
-    scannedCount += keysToDelete.length;
-    lastRemaining = keysToDelete;
-    if (keysToDelete.length === 0) break;
-    for (let i = 0; i < keysToDelete.length; i += deleteBatchSize) {
-      const batch = keysToDelete.slice(i, i + deleteBatchSize);
-      const results = await Promise.allSettled(
-        batch.map((key) => KV.delete(key))
-      );
-      for (const result of results) {
-        if (result.status === "fulfilled") {
-          deletedCount++;
-        }
+    do {
+      const page = await KV.list({ limit: listLimit, cursor });
+      const keys = Array.isArray(page?.keys) ? page.keys : [];
+      for (const entry of keys) {
+        const keyName = entry?.name;
+        if (!keyName || KEEP_KEYS.has(keyName) || seen.has(keyName)) continue;
+        seen.add(keyName);
+        candidates.push(keyName);
       }
-    }
-    if (preservedValue !== null) {
-      try {
-        await KV.put(KEEP_KEY, preservedValue);
-      } catch (err) {
-        console.error("clearKv: failed to restore anime_id_progress:", err);
-        return {
-          ok: false,
-          reason: "kv_restore_failed",
-          error: String(err?.message || err),
-          kept_key: KEEP_KEY,
-          deleted_count: deletedCount,
-        };
-      }
+
+      cursor = page?.list_complete ? undefined : page?.cursor;
+    } while (cursor);
+    return candidates;
+  };
+  let candidates = [];
+  try {
+    candidates = await collectDeleteCandidates();
+  } catch (err) {
+    console.error("clearKv: KV.list failed:", err);
+    return {
+      ok: false,
+      reason: "kv_list_failed",
+      error: String(err?.message || err),
+      kept_keys: [...KEEP_KEYS],
+      deleted_count: deletedCount,
+      remaining_number_of_anime: currentAnimeCount,
+    };
+  }
+  scannedCount = candidates.length;
+  const keysToDelete = candidates.slice(0, targetDeleteCount);
+  remainingSample = candidates.slice(targetDeleteCount, targetDeleteCount + 10);
+  for (let i = 0; i < keysToDelete.length; i += deleteBatchSize) {
+    const batch = keysToDelete.slice(i, i + deleteBatchSize);
+    const results = await Promise.allSettled(batch.map((key) => KV.delete(key)));
+    for (const result of results) {
+      if (result.status === "fulfilled") deletedCount++;
     }
   }
-  return {
+  const remainingAnimeCount =
+    currentAnimeCount === null
+      ? null
+      : Math.max(currentAnimeCount - deletedCount, 0);
+  if (remainingAnimeCount !== null) {
+    try {
+      await KV.put("number_of_anime", String(remainingAnimeCount));
+    } catch (err) {
+      console.error("clearKv: failed to update number_of_anime:", err);
+      return {
+        ok: false,
+        reason: "kv_update_failed",
+        error: String(err?.message || err),
+        kept_keys: [...KEEP_KEYS],
+        deleted_count: deletedCount,
+        scanned_count: scannedCount,
+        remaining_number_of_anime: remainingAnimeCount,
+        remaining_sample: remainingSample,
+      };
+    }
+  }
+    return {
     ok: true,
-    kept_key: KEEP_KEY,
-    kept_value: preservedValue,
+    kept_keys: [...KEEP_KEYS],
     deleted_count: deletedCount,
     scanned_count: scannedCount,
-    remaining_sample: lastRemaining.slice(0, 10),
+    deleted_target: targetDeleteCount,
+    remaining_number_of_anime: remainingAnimeCount,
+    remaining_sample: remainingSample,
   };
 }
 function guard() {
@@ -537,21 +552,21 @@ async function runScheduled(env, db, opts = {}) {
   requestCounter = 0;
   subrequestCounter = 0;
   const progressState = await readProgressState(env);
-  const readCount = async () => {
-    const kv = env?.PROGRESS_KV;
-    if (!kv || typeof kv.get !== "function") return 0;
-    const raw = await kv.get(GIT_BUFFER_COUNT_KEY).catch(() => null);
-    const n = Number(raw);
-    return Number.isInteger(n) && n >= 0 ? n : 0;
+  const toNonNegativeInt = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : 0;
   };
-  const count = Number.isFinite(Number(opts.count))
-    ? Math.max(0, Math.trunc(Number(opts.count)))
-    : await readCount();
+  const numberOfAnime = toNonNegativeInt(
+    progressState?.number_of_anime ?? progressState?.numberOfAnime
+  );
   const mode =
-    String(opts.mode || "").toLowerCase() === "flush" || count >= GIT_BUFFER_FLUSH_THRESHOLD
+    String(opts.mode || "").toLowerCase() === "flush" ||
+    numberOfAnime >= GIT_BUFFER_FLUSH_THRESHOLD
       ? "flush"
       : "process";
-  console.log(`[runScheduled] mode=${mode}, count=${count}`);
+  console.log(
+    `[runScheduled] mode=${mode}, number_of_anime=${numberOfAnime}, threshold=${GIT_BUFFER_FLUSH_THRESHOLD}`
+  );
   if (mode === "flush") {
     return await commitExport(env, {
       ...opts,
@@ -595,18 +610,42 @@ async scheduled(event, env, ctx) {
 };
 async function readProgressState(env) {
   const kv = env?.PROGRESS_KV;
+  const defaultState = {
+    animeId: null,
+    totalCharacters: [],
+    processedCharacters: [],
+    numberOfAnime: null,
+    number_of_anime: null,
+  };
   if (!kv || typeof kv.get !== "function") {
-    return {
-      animeId: null,
-      totalCharacters: [],
-      processedCharacters: [],
-    };
+    return defaultState;
   }
   const normalizeAnimeId = (value) => {
-  if (value === null || value === undefined) return null;
-  const s = String(value).trim();
-  return s ? s : null;
-};
+    if (value === null || value === undefined) return null;
+    const s = String(value).trim();
+    return s ? s : null;
+  };
+  const toIntegerOrNull = (value) => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "number") {
+      return Number.isFinite(value) ? Math.trunc(value) : null;
+    }
+    if (typeof value === "string") {
+      const s = value.trim();
+      if (!s) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? Math.trunc(n) : null;
+    }
+    return null;
+  };
+  const toPositiveInt = (value) => {
+    const n = toIntegerOrNull(value);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  };
+  const toNonNegativeInt = (value) => {
+    const n = toIntegerOrNull(value);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  };
   const parseArrayValue = (raw) => {
     if (raw == null) return [];
     if (Array.isArray(raw)) {
@@ -620,9 +659,15 @@ async function readProgressState(env) {
       try {
         const parsed = JSON.parse(text);
         if (Array.isArray(parsed)) {
-          return parsed.map((v) => toPositiveInt(v)).filter((v) => v !== null);
+          return parsed
+            .map((v) => toPositiveInt(v))
+            .filter((v) => v !== null);
         }
-      } catch (_) {}
+        if (parsed && typeof parsed === "object") {
+          return parseArrayValue(parsed);
+        }
+      } catch (_) {
+      }
       return text
         .split(/[\s,]+/g)
         .map((v) => toPositiveInt(v))
@@ -633,18 +678,50 @@ async function readProgressState(env) {
       if (Array.isArray(raw.processed_characters)) return parseArrayValue(raw.processed_characters);
       if (Array.isArray(raw.ids)) return parseArrayValue(raw.ids);
       if (Array.isArray(raw.data)) return parseArrayValue(raw.data);
+      if (Array.isArray(raw.items)) return parseArrayValue(raw.items);
+      if (Array.isArray(raw.values)) return parseArrayValue(raw.values);
     }
     return [];
   };
-  const [animeIdRaw, totalRaw, processedRaw] = await Promise.all([
-    kv.get("anime_id_progress"),
-    kv.get("total_characters"),
-    kv.get("processed_characters"),
+  const parseAnimeCountValue = (raw) => {
+    if (raw == null) return null;
+    if (Array.isArray(raw)) {
+      if (raw.length === 0) return null;
+      return parseAnimeCountValue(raw[0]);
+    }
+    if (typeof raw === "number" || typeof raw === "string") {
+      return toNonNegativeInt(raw);
+    }
+    if (typeof raw === "object") {
+      if ("number_of_anime" in raw) return parseAnimeCountValue(raw.number_of_anime);
+      if ("numberOfAnime" in raw) return parseAnimeCountValue(raw.numberOfAnime);
+      if ("anime_count" in raw) return parseAnimeCountValue(raw.anime_count);
+      if ("count" in raw) return parseAnimeCountValue(raw.count);
+      if ("total" in raw) return parseAnimeCountValue(raw.total);
+      if ("value" in raw) return parseAnimeCountValue(raw.value);
+    }
+    return null;
+  };
+  const safeGet = async (key) => {
+    try {
+      return await kv.get(key);
+    } catch (_) {
+      return null;
+    }
+  };
+  const [animeIdRaw, totalRaw, processedRaw, numberOfAnimeRaw] = await Promise.all([
+    safeGet("anime_id_progress"),
+    safeGet("total_characters"),
+    safeGet("processed_characters"),
+    safeGet("number_of_anime"),
   ]);
+  const numberOfAnime = parseAnimeCountValue(numberOfAnimeRaw);
   return {
     animeId: normalizeAnimeId(animeIdRaw),
     totalCharacters: parseArrayValue(totalRaw),
     processedCharacters: parseArrayValue(processedRaw),
+    numberOfAnime,
+    number_of_anime: numberOfAnime,
   };
 }
 async function importCharacters(env, db, opts = {}) {
@@ -2046,7 +2123,10 @@ if (pendingWrites.size > 0) {
   }
   const processedFiles = new Set([...animeBatch, ...characterTasks]);
   env.__exportFiles = allFiles.filter((f) => !processedFiles.has(f));
-  await clearKv(env, { maxPasses: 3 });
+  await clearKv(env, {
+  maxPasses: 3,
+  flushBatchSize: GIT_BUFFER_FLUSH_THRESHOLD,
+});
   return {
     ok: true,
     committed: pendingWrites.size,
